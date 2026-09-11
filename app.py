@@ -474,6 +474,8 @@ def friendly_error(error: Exception) -> str:
         return "🌐 Cannot reach Groq — check your connection and retry."
     if isinstance(error, APIStatusError):
         return "❌ Groq rejected the request — verify model availability and account limits."
+    if isinstance(error, (ValueError, json.JSONDecodeError)):
+        return f"⚠️ {error}"
     return f"⚠️ Unexpected error: {type(error).__name__}. Try again or choose a different model."
 
 
@@ -589,20 +591,37 @@ def request_json(
     api_key: str, model: str,
     system_prompt: str, user_content: str,
     max_tokens: int = 6000,
+    reasoning_effort: str = "low",
 ) -> dict:
+    kwargs = dict(
+        model=model,
+        temperature=0.05,
+        max_tokens=max_tokens,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+    )
+    # gpt-oss models are reasoning models: hidden "thinking" tokens count
+    # against max_tokens too. Default reasoning effort is "medium", which
+    # can eat most of the budget before any JSON is written and truncate
+    # the response. Pin it to "low" for this structured-extraction task —
+    # only send it for gpt-oss models, since other Groq models reject the
+    # param outright.
+    if "gpt-oss" in model:
+        kwargs["reasoning_effort"] = reasoning_effort
+
     with Groq(api_key=api_key, timeout=90.0, max_retries=1) as client:
-        result = client.chat.completions.create(
-            model=model,
-            temperature=0.05,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-        )
+        result = client.chat.completions.create(**kwargs)
+
     if result.choices[0].finish_reason == "length":
-        raise ValueError("Response was truncated — try a shorter report.")
+        raise ValueError(
+            f"Response was cut off after {max_tokens:,} tokens before it "
+            "finished — the report likely has more values than fit in "
+            "this budget. Try a shorter report, or raise max_tokens in "
+            "request_json()."
+        )
     return json.loads(result.choices[0].message.content or "{}")
 
 
