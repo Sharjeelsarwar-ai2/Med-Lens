@@ -10,6 +10,8 @@ import json
 import os
 import re
 import textwrap
+import types as _types
+import typing as _typing
 from typing import Literal
 
 import fitz  # PyMuPDF
@@ -437,9 +439,12 @@ class DoctorQuestion(BaseModel):
 
 
 class ReportTranslation(BaseModel):
-    report_type: str = Field(max_length=100)
-    patient_summary: str = Field(max_length=600)
-    overall_impression: str = Field(max_length=1200)
+    # NOTE: limits below are generous — the sanitizer trims to fit if the
+    # model gets verbose. Earlier caps (100/600/1200) tripped ValidationError
+    # whenever the model listed multiple panels or was unusually detailed.
+    report_type: str = Field(max_length=300)
+    patient_summary: str = Field(max_length=800)
+    overall_impression: str = Field(max_length=2000)
     lab_values: list[LabValue] = Field(default_factory=list)
     glossary: list[GlossaryTerm] = Field(default_factory=list, max_length=20)
     doctor_questions: list[DoctorQuestion] = Field(
@@ -509,6 +514,68 @@ def strip_tags(text: str) -> str:
         return ""
     stripped = _TAG_RE.sub(" ", str(text))
     return re.sub(r"\s+", " ", stripped).strip()
+
+
+def sanitize_for_schema(data: dict, model_cls: type[BaseModel]) -> dict:
+    """Truncate strings/lists in raw LLM JSON to fit the pydantic schema.
+
+    The model doesn't reliably respect max_length in the JSON schema, so a
+    single over-long field (e.g. report_type listing six panels) would raise
+    a ValidationError and kill the whole translation. This walks the raw
+    dict against the model's field metadata and clips anything too long
+    before validation, turning a hard failure into a harmless trim.
+    """
+    if not isinstance(data, dict):
+        return data
+
+    out: dict = {}
+    for name, field in model_cls.model_fields.items():
+        if name not in data:
+            continue
+        value = data[name]
+        ann = field.annotation
+
+        # Unwrap Optional[X]
+        origin = _typing.get_origin(ann)
+        if origin in (_typing.Union, _types.UnionType):
+            non_none = [a for a in _typing.get_args(ann) if a is not type(None)]
+            if non_none:
+                ann = non_none[0]
+                origin = _typing.get_origin(ann)
+
+        # Field-level max_length — applies to str length OR list length
+        max_len = None
+        for meta in (field.metadata or ()):
+            ml = getattr(meta, "max_length", None)
+            if ml is not None:
+                max_len = ml if max_len is None else min(max_len, ml)
+
+        args = _typing.get_args(ann)
+
+        if isinstance(value, str):
+            out[name] = value[:max_len] if max_len else value
+
+        elif isinstance(value, list):
+            if max_len:
+                value = value[:max_len]
+            inner = args[0] if args else None
+            if isinstance(inner, type) and issubclass(inner, BaseModel):
+                value = [
+                    sanitize_for_schema(v, inner) if isinstance(v, dict) else v
+                    for v in value
+                ]
+            out[name] = value
+
+        elif isinstance(ann, type) and issubclass(ann, BaseModel) and isinstance(value, dict):
+            out[name] = sanitize_for_schema(value, ann)
+
+        else:
+            out[name] = value
+
+    # Preserve any extra keys the model invented (pydantic will ignore them)
+    for k, v in data.items():
+        out.setdefault(k, v)
+    return out
 
 
 def extract_pdf_text(file_bytes: bytes) -> str:
@@ -807,6 +874,8 @@ ABSOLUTE RULES — VIOLATING ANY RULE IS FORBIDDEN:
 12. Every text field must be PLAIN TEXT ONLY — no HTML tags (e.g. <p>,
     <br>, <div>), no Markdown formatting, no code blocks. Write normal
     sentences and paragraphs as plain strings.
+13. Keep report_type short: list only the panel names (e.g. "CBC + BMP
+    + Lipid Panel"), max 300 characters.
 
 STATUS CLASSIFICATION (use ONLY report data):
 - "Normal": value is within the stated reference range.
@@ -1141,7 +1210,9 @@ with st.expander(
                     report_text + ocr_context,
                     max_tokens=6000,
                 )
-                translation = ReportTranslation.model_validate(raw)
+                translation = ReportTranslation.model_validate(
+                    sanitize_for_schema(raw, ReportTranslation)
+                )
                 st.session_state["translation"] = translation.model_dump()
                 st.session_state["report_text"] = report_text
                 st.session_state["ocr_used"] = ocr_used
@@ -1510,7 +1581,9 @@ with tab_ask:
                     payload,
                     max_tokens=2500,
                 )
-                answer = FollowUpAnswer.model_validate(raw)
+                answer = FollowUpAnswer.model_validate(
+                    sanitize_for_schema(raw, FollowUpAnswer)
+                )
                 st.session_state["followup"] = {
                     "question": question,
                     "answer": answer.model_dump(),
