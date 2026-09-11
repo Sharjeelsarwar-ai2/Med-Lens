@@ -1436,30 +1436,30 @@ with tab_values:
                             f'{causes_items}</ul>'
                         )
 
+                        card_html = (
+                           f'<div class="{css_class}">'
+                           f'<div class="ml-label" style="color:{STATUS_COLORS[val.status]}">'
+                           f'{icon} {val.status.upper()}'
+                           f'</div>'
+                           f'<h4>{clean_text(val.name)}</h4>'
+                           f'<p>'
+                           f'<strong>Your result:</strong> '
+                           f'{clean_text(val.reported_value)} '
+                           f'{clean_text(val.unit)}&nbsp;&nbsp;|&nbsp;&nbsp; '
+                           f'<strong>Normal range:</strong> '
+                           f'{clean_text(val.reference_range)} '
+                           f'{clean_text(val.unit)}'
+                           f'</p>'
+                           f'<p style="margin-top:8px">'
+                           f'{clean_text(val.plain_explanation)}'
+                           f'</p>'
+                           f'{causes_html}'
+                           f'</div>'
+                        )
+
                     with col:
-                        st.markdown(f"""
-                        <div class="{css_class}">
-                            <div class="ml-label" style="color:{STATUS_COLORS[val.status]}">
-                                {icon} {val.status.upper()}
-                            </div>
-                            <h4>{clean_text(val.name)}</h4>
-                            <p>
-                                <strong>Your result:</strong>
-                                {clean_text(val.reported_value)}
-                                {clean_text(val.unit)}&nbsp;&nbsp;|&nbsp;&nbsp;
-                                <strong>Normal range:</strong>
-                                {clean_text(val.reference_range)}
-                                {clean_text(val.unit)}
-                            </p>
-                            <p style="margin-top:8px">
-                                {clean_text(val.plain_explanation)}
-                            </p>
-                            {causes_html}
-                        </div>
-                        """, unsafe_allow_html=True)
-
+                        st.markdown(card_html, unsafe_allow_html=True)
                         render_evidence(val.source_quote)
-
 
 # ── Glossary tab ──────────────────────────────────────────────
 
