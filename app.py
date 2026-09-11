@@ -692,38 +692,36 @@ def extract_pdf_ocr(file_bytes: bytes) -> tuple[str, list[Image.Image]]:
 
 def preprocess_image_for_ocr(img: Image.Image) -> Image.Image:
     """Enhance an image for better OCR accuracy."""
+    # Convert to RGB if needed
     if img.mode != "RGB":
         img = img.convert("RGB")
+
+    # Resize if too small (below 1500px width)
     w, h = img.size
     if w < 1500:
         scale = 1500 / w
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+    # Convert to grayscale
     img = img.convert("L")
+
+    # Increase contrast
     img = ImageEnhance.Contrast(img).enhance(2.0)
+
+    # Increase sharpness
     img = ImageEnhance.Sharpness(img).enhance(2.0)
+
+    # Apply slight blur to reduce noise, then sharpen
     img = img.filter(ImageFilter.MedianFilter(size=3))
     img = img.filter(ImageFilter.SHARPEN)
-    img = img.point(lambda p: 255 if p > threshold else 0, mode="1")
-    img = img.convert("L")
-    return img
 
-
-# The above has a bug — define threshold explicitly:
-def _preprocess_image_for_ocr(img: Image.Image) -> Image.Image:
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    w, h = img.size
-    if w < 1500:
-        scale = 1500 / w
-        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-    img = img.convert("L")
-    img = ImageEnhance.Contrast(img).enhance(2.0)
-    img = ImageEnhance.Sharpness(img).enhance(2.0)
-    img = img.filter(ImageFilter.MedianFilter(size=3))
-    img = img.filter(ImageFilter.SHARPEN)
+    # Binarize (adaptive-like thresholding via point)
     threshold = 140
     img = img.point(lambda p: 255 if p > threshold else 0, mode="1")
+
+    # Convert back to grayscale for Tesseract
     img = img.convert("L")
+
     return img
 
 
@@ -1069,13 +1067,12 @@ st.markdown("""
         <h1>Understand your lab results<br>in plain English.</h1>
         <p>
             Upload any medical report — typed, scanned, or photographed —
-            and get a clear, jargon-free translation. Every value is
-            <strong>verified against your report text</strong> before it
-            reaches your screen. Nothing invented. Nothing external.
+            and get a clear, jargon-free translation.
+            Every explanation comes directly from <strong>your report</strong> —
+            nothing is invented, nothing is sourced externally.
         </p>
         <span class="ml-pill">🔒 YOUR DATA ONLY</span>
         <span class="ml-pill">🎯 GROUNDED IN YOUR TEXT</span>
-        <span class="ml-pill">✅ VERIFIED OUTPUT</span>
         <span class="ml-pill">📷 OCR SUPPORTED</span>
         <span class="ml-pill">📄 EVIDENCE CITED</span>
         <span class="ml-pill">⚕️ NOT MEDICAL ADVICE</span>
@@ -1086,13 +1083,6 @@ st.markdown("""
             <div>
                 <div class="ml-side-title">Value-by-value breakdown</div>
                 <div class="ml-side-sub">Status, range &amp; plain-language meaning</div>
-            </div>
-        </div>
-        <div class="ml-side-item">
-            <div class="ml-side-ico">🛡️</div>
-            <div>
-                <div class="ml-side-title">Anti-hallucination check</div>
-                <div class="ml-side-sub">Every value re-verified against your text</div>
             </div>
         </div>
         <div class="ml-side-item">
