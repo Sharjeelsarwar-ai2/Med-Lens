@@ -664,7 +664,7 @@ def fp(text: str, extra: str = "") -> str:
 def request_json(
     api_key: str, model: str,
     system_prompt: str, user_content: str,
-    max_tokens: int = 16000,
+    max_tokens: int = 7500,
     reasoning_effort: str = "low",
 ) -> dict:
     kwargs = dict(
