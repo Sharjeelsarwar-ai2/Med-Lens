@@ -437,7 +437,12 @@ class DoctorQuestion(BaseModel):
 
 
 class ReportTranslation(BaseModel):
-    report_type: str = Field(max_length=100)
+    # NOTE: widened from 100 -> 180. Multi-panel reports (CBC + BMP +
+    # Lipid + LFT + Thyroid + Urinalysis, etc.) push gpt-oss to describe
+    # report_type with several panel names strung together, which
+    # regularly exceeded a 100-char cap and raised a validation error
+    # before the UI could render anything.
+    report_type: str = Field(max_length=180)
     patient_summary: str = Field(max_length=600)
     overall_impression: str = Field(max_length=1200)
     lab_values: list[LabValue] = Field(default_factory=list)
@@ -509,6 +514,24 @@ def strip_tags(text: str) -> str:
         return ""
     stripped = _TAG_RE.sub(" ", str(text))
     return re.sub(r"\s+", " ", stripped).strip()
+
+
+def clip_json_fields(obj: dict, limits: dict) -> dict:
+    """Defensively truncate top-level string fields on a raw model response
+    before Pydantic validation.
+
+    The prompt tells the model to respect each field's max length, but
+    LLMs don't always comply exactly (this is what caused the
+    'report_type ... string_too_long' crash). Rather than let one
+    oversized field blow up the entire translation and lose the user's
+    upload/OCR work, clip anything that overshoots so validation succeeds
+    and the UI renders — a slightly truncated field beats a hard failure.
+    """
+    for key, max_len in limits.items():
+        value = obj.get(key)
+        if isinstance(value, str) and len(value) > max_len:
+            obj[key] = value[:max_len].rstrip()
+    return obj
 
 
 def extract_pdf_text(file_bytes: bytes) -> str:
@@ -807,6 +830,10 @@ ABSOLUTE RULES — VIOLATING ANY RULE IS FORBIDDEN:
 12. Every text field must be PLAIN TEXT ONLY — no HTML tags (e.g. <p>,
     <br>, <div>), no Markdown formatting, no code blocks. Write normal
     sentences and paragraphs as plain strings.
+13. report_type must be SHORT — under 15 words. For a multi-panel report
+    (e.g. CBC + metabolic + lipid + liver + thyroid), summarize it as
+    something like "Multi-panel blood test (CBC, metabolic, lipid,
+    liver, thyroid)" rather than spelling out every panel's full name.
 
 STATUS CLASSIFICATION (use ONLY report data):
 - "Normal": value is within the stated reference range.
@@ -1141,6 +1168,17 @@ with st.expander(
                     report_text + ocr_context,
                     max_tokens=6000,
                 )
+                # Defensive clip: the model is told each field's max length
+                # but occasionally overshoots (this is what caused the
+                # report_type string_too_long crash on multi-panel reports).
+                # Clip before validation so one long field degrades
+                # gracefully instead of throwing away the whole translation.
+                raw = clip_json_fields(raw, {
+                    "report_type": 180,
+                    "patient_summary": 600,
+                    "overall_impression": 1200,
+                    "confidence_note": 400,
+                })
                 translation = ReportTranslation.model_validate(raw)
                 st.session_state["translation"] = translation.model_dump()
                 st.session_state["report_text"] = report_text
@@ -1510,6 +1548,11 @@ with tab_ask:
                     payload,
                     max_tokens=2500,
                 )
+                # Same defensive clip as the translation call above.
+                raw = clip_json_fields(raw, {
+                    "answer": 1500,
+                    "reason_cannot_answer": 300,
+                })
                 answer = FollowUpAnswer.model_validate(raw)
                 st.session_state["followup"] = {
                     "question": question,
