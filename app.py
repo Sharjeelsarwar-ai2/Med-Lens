@@ -553,12 +553,28 @@ def extract_pdf_ocr(file_bytes: bytes) -> tuple[str, list[Image.Image]]:
             img = Image.open(io.BytesIO(pix.tobytes("png")))
             images.append(img)
             processed = preprocess_image_for_ocr(img)
-            text_parts.append(pytesseract.image_to_string(processed))
+            text_parts.append(
+                pytesseract.image_to_string(processed, config=_TESSERACT_CONFIG)
+            )
     return "\n".join(text_parts).strip(), images
 
 
 def preprocess_image_for_ocr(img: Image.Image) -> Image.Image:
-    """Enhance an image for better OCR accuracy."""
+    """Enhance an image for better OCR accuracy.
+
+    NOTE: this used to end with a hard fixed-threshold binarization
+    (pixel > 140 -> pure white, else pure black). That works on flat,
+    evenly-lit scans, but real phone photos of lab reports almost always
+    have uneven lighting, shadows, or glare — a single fixed threshold
+    then wipes out entire rows of small table digits (values, ranges)
+    while larger headings survive, since those are the darkest/highest-
+    contrast text on the page. The result: the quality heuristic below
+    still sees enough recognizable medical *words* to call it "Good" or
+    "Fair", but the actual value/range columns are gone, so the AI has
+    nothing to extract lab_values from. Tesseract already does its own
+    internal binarization tuned per-region, so we now hand it an
+    enhanced *grayscale* image instead of pre-binarizing ourselves.
+    """
     # Convert to RGB if needed
     if img.mode != "RGB":
         img = img.convert("RGB")
@@ -574,24 +590,27 @@ def preprocess_image_for_ocr(img: Image.Image) -> Image.Image:
 
     # Increase contrast
     enhancer = ImageEnhance.Contrast(img)
-    img = enhancer.enhance(2.0)
+    img = enhancer.enhance(1.6)
 
     # Increase sharpness
     enhancer = ImageEnhance.Sharpness(img)
-    img = enhancer.enhance(2.0)
+    img = enhancer.enhance(1.6)
 
-    # Apply slight blur to reduce noise then sharpen
+    # Light denoise, then sharpen — no hard binarization. Leave the
+    # image as clean grayscale so Tesseract's own thresholding (which
+    # adapts per text-line/region) can do its job on faint or uneven
+    # areas that a single global cutoff would destroy.
     img = img.filter(ImageFilter.MedianFilter(size=3))
     img = img.filter(ImageFilter.SHARPEN)
 
-    # Binarize (adaptive-like thresholding via point)
-    threshold = 140
-    img = img.point(lambda p: 255 if p > threshold else 0, mode="1")
-
-    # Convert back to grayscale for Tesseract
-    img = img.convert("L")
-
     return img
+
+
+# Tesseract page-segmentation mode 6 assumes a single uniform block of
+# text, which reads much better on structured lab-report tables (rows of
+# name/value/range/unit) than the default PSM, which tends to fragment
+# multi-column tables into scrambled word order.
+_TESSERACT_CONFIG = "--oem 3 --psm 6"
 
 
 def estimate_ocr_quality(text: str) -> tuple[str, str, str]:
@@ -634,7 +653,7 @@ def extract_image_ocr(file_bytes: bytes) -> tuple[str, Image.Image]:
     """OCR a single image file."""
     img = Image.open(io.BytesIO(file_bytes))
     processed = preprocess_image_for_ocr(img)
-    text = pytesseract.image_to_string(processed)
+    text = pytesseract.image_to_string(processed, config=_TESSERACT_CONFIG)
     return text.strip(), img
 
 
@@ -834,6 +853,16 @@ ABSOLUTE RULES — VIOLATING ANY RULE IS FORBIDDEN:
     (e.g. CBC + metabolic + lipid + liver + thyroid), summarize it as
     something like "Multi-panel blood test (CBC, metabolic, lipid,
     liver, thyroid)" rather than spelling out every panel's full name.
+14. If the text was extracted via OCR, column alignment may be broken —
+    a test's name, result, reference range, and unit can appear out of
+    their original table order, split across lines, or with extra/missing
+    whitespace. Do NOT skip a row just because it isn't in clean
+    columns: actively reconstruct each test as (name, result, range,
+    unit) by matching numbers to the nearest test name and looking for
+    a "<low> - <high>" or "<operator> <number>" pattern nearby for the
+    range. Only omit a value entirely if it is genuinely illegible or
+    you cannot confidently match a result to a test name — do not leave
+    lab_values empty just because the source formatting is messy.
 
 STATUS CLASSIFICATION (use ONLY report data):
 - "Normal": value is within the stated reference range.
@@ -1162,11 +1191,19 @@ with st.expander(
             with st.spinner(
                 "🔬 Reading your report carefully — this takes 15–30 seconds…"
             ):
+                # OCR'd text needs more reasoning to reconstruct broken
+                # table rows into (name, value, range, unit) triples than
+                # clean pasted/digital-PDF text does. "low" effort was
+                # enough tokens to write valid JSON but not enough to
+                # untangle a scrambled table, which is why lab_values
+                # came back empty even though the report clearly had
+                # values in it.
                 raw = request_json(
                     api_key, model,
                     TRANSLATION_PROMPT,
                     report_text + ocr_context,
                     max_tokens=6000,
+                    reasoning_effort="medium" if ocr_used else "low",
                 )
                 # Defensive clip: the model is told each field's max length
                 # but occasionally overshoots (this is what caused the
