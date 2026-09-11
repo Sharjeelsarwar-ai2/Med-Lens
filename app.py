@@ -8,6 +8,7 @@ import html
 import io
 import json
 import os
+import re
 import textwrap
 from typing import Literal
 
@@ -465,6 +466,25 @@ def get_setting(name: str, default: str = "") -> str:
     return str(value or os.getenv(name, default))
 
 
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def clean_text(text: str) -> str:
+    """Strip any HTML/markup the model emitted, then escape for safe display.
+
+    LLM output is untrusted text, not markup — the translation prompt tells
+    gpt-oss to write plain language, but models don't always comply (this is
+    exactly what produced literal '</p>' tags showing up in the UI). Stripping
+    tags here means a stray '<p style=...>' in a field can never leak through
+    to the page again, regardless of what the model decides to emit.
+    """
+    if not text:
+        return ""
+    stripped = _TAG_RE.sub(" ", str(text))
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    return html.escape(stripped)
+
+
 def friendly_error(error: Exception) -> str:
     if isinstance(error, AuthenticationError):
         return "🔑 Authentication failed — check GROQ_API_KEY in your Streamlit secrets."
@@ -477,6 +497,18 @@ def friendly_error(error: Exception) -> str:
     if isinstance(error, (ValueError, json.JSONDecodeError)):
         return f"⚠️ {error}"
     return f"⚠️ Unexpected error: {type(error).__name__}. Try again or choose a different model."
+
+
+def strip_tags(text: str) -> str:
+    """Like clean_text, but for values passed straight to st.markdown/
+    st.info/st.warning (which render markdown, not raw HTML) — strip stray
+    tags without HTML-escaping, since escaping here would show '&amp;' etc.
+    literally instead of being interpreted as markdown.
+    """
+    if not text:
+        return ""
+    stripped = _TAG_RE.sub(" ", str(text))
+    return re.sub(r"\s+", " ", stripped).strip()
 
 
 def extract_pdf_text(file_bytes: bytes) -> str:
@@ -642,7 +674,7 @@ def render_disclaimer():
 
 def render_evidence(quote: str):
     if quote.strip():
-        escaped = html.escape(quote.strip())
+        escaped = clean_text(quote.strip())
         st.markdown(
             f'<div class="ml-evidence">📄 <em>From your report:</em> "{escaped}"</div>',
             unsafe_allow_html=True,
@@ -772,6 +804,9 @@ ABSOLUTE RULES — VIOLATING ANY RULE IS FORBIDDEN:
 11. If the text appears to contain OCR artifacts or garbled characters,
     note this in confidence_note and do your best with readable parts.
     Do NOT guess values that are illegible.
+12. Every text field must be PLAIN TEXT ONLY — no HTML tags (e.g. <p>,
+    <br>, <div>), no Markdown formatting, no code blocks. Write normal
+    sentences and paragraphs as plain strings.
 
 STATUS CLASSIFICATION (use ONLY report data):
 - "Normal": value is within the stated reference range.
@@ -797,6 +832,8 @@ ABSOLUTE RULES:
 6. Include source_quotes from the report to support every claim.
 7. If parts of the report appear garbled from OCR, acknowledge this
    limitation honestly.
+8. Every text field must be PLAIN TEXT ONLY — no HTML tags, no Markdown
+   formatting, no code blocks.
 
 Return ONLY valid JSON matching this schema:
 {json.dumps(FollowUpAnswer.model_json_schema(), indent=2)}
@@ -1188,22 +1225,22 @@ with tab_summary:
     with left:
         with st.container(border=True):
             st.markdown("##### 📄 Report Type")
-            st.markdown(f"**{tr.report_type}**")
+            st.markdown(f"**{strip_tags(tr.report_type)}**")
 
         with st.container(border=True):
             st.markdown("##### 👤 Patient Information")
-            st.markdown(f"{tr.patient_summary}")
+            st.markdown(strip_tags(tr.patient_summary))
 
         st.markdown(
             f'<div class="ml-summary">'
             f'<strong>🔍 Overall Impression</strong><br><br>'
-            f'{html.escape(tr.overall_impression)}</div>',
+            f'{clean_text(tr.overall_impression)}</div>',
             unsafe_allow_html=True,
         )
 
         if tr.confidence_note:
             st.markdown("")
-            st.info(f"🔎 **AI Confidence Note:** {tr.confidence_note}")
+            st.info(f"🔎 **AI Confidence Note:** {strip_tags(tr.confidence_note)}")
 
     with right:
         if tr.lab_values:
@@ -1248,7 +1285,7 @@ with tab_summary:
         if tr.important_notes:
             st.markdown("##### ⚠️ Important Notes from Your Report")
             for note in tr.important_notes:
-                st.warning(note, icon="📌")
+                st.warning(strip_tags(note), icon="📌")
 
 
 # ── Lab Values tab ────────────────────────────────────────────
@@ -1313,7 +1350,7 @@ with tab_values:
                     causes_html = ""
                     if val.possible_causes:
                         causes_items = "".join(
-                            f"<li>{html.escape(c)}</li>"
+                            f"<li>{clean_text(c)}</li>"
                             for c in val.possible_causes
                         )
                         causes_html = (
@@ -1330,17 +1367,17 @@ with tab_values:
                             <div class="ml-label" style="color:{STATUS_COLORS[val.status]}">
                                 {icon} {val.status.upper()}
                             </div>
-                            <h4>{html.escape(val.name)}</h4>
+                            <h4>{clean_text(val.name)}</h4>
                             <p>
                                 <strong>Your result:</strong>
-                                {html.escape(val.reported_value)}
-                                {html.escape(val.unit)}&nbsp;&nbsp;|&nbsp;&nbsp;
+                                {clean_text(val.reported_value)}
+                                {clean_text(val.unit)}&nbsp;&nbsp;|&nbsp;&nbsp;
                                 <strong>Normal range:</strong>
-                                {html.escape(val.reference_range)}
-                                {html.escape(val.unit)}
+                                {clean_text(val.reference_range)}
+                                {clean_text(val.unit)}
                             </p>
                             <p style="margin-top:8px">
-                                {html.escape(val.plain_explanation)}
+                                {clean_text(val.plain_explanation)}
                             </p>
                             {causes_html}
                         </div>
@@ -1378,8 +1415,8 @@ with tab_glossary:
         for term in display_glossary:
             st.markdown(f"""
             <div class="ml-glossary">
-                <strong>🔬 {html.escape(term.term)}</strong><br>
-                <span>{html.escape(term.definition)}</span>
+                <strong>🔬 {clean_text(term.term)}</strong><br>
+                <span>{clean_text(term.definition)}</span>
             </div>
             """, unsafe_allow_html=True)
             render_evidence(term.source_quote)
@@ -1405,16 +1442,16 @@ with tab_questions:
             st.markdown(f"""
             <div class="ml-question">
                 <strong>❓ Question {i}:</strong>
-                {html.escape(q.question)}<br>
+                {clean_text(q.question)}<br>
                 <span style="color:#fde68a;font-size:13px">
-                    💡 <em>Why ask this:</em> {html.escape(q.reason)}
+                    💡 <em>Why ask this:</em> {clean_text(q.reason)}
                 </span>
             </div>
             """, unsafe_allow_html=True)
 
         st.markdown("")
         questions_text = "\n\n".join(
-            f"Q{i}: {q.question}\nWhy: {q.reason}"
+            f"Q{i}: {strip_tags(q.question)}\nWhy: {strip_tags(q.reason)}"
             for i, q in enumerate(tr.doctor_questions, 1)
         )
         st.download_button(
@@ -1486,18 +1523,18 @@ with tab_ask:
         ans = FollowUpAnswer.model_validate(saved["answer"])
 
         with st.container(border=True):
-            st.markdown(f"**You asked:** {html.escape(saved['question'])}")
+            st.markdown(f"**You asked:** {clean_text(saved['question'])}")
             st.markdown("")
 
             if ans.cannot_answer:
                 st.warning(
                     f"🚫 **Cannot answer from your report.** "
-                    f"{ans.reason_cannot_answer}"
+                    f"{strip_tags(ans.reason_cannot_answer)}"
                 )
             else:
                 st.markdown(
                     f'<div class="ml-summary">'
-                    f'{html.escape(ans.answer)}</div>',
+                    f'{clean_text(ans.answer)}</div>',
                     unsafe_allow_html=True,
                 )
 
