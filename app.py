@@ -36,7 +36,7 @@ st.set_page_config(
 
 # ─── Constants ────────────────────────────────────────────────
 
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
 MAX_UPLOAD_MB = 10
 MAX_TEXT_CHARS = 12_000
 MAX_QUESTION_CHARS = 500
@@ -59,34 +59,86 @@ STATUS_ICONS = {
 
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700&display=swap');
+
 /* ── Global ── */
+html, body, [class*="css"]{
+    font-family:'Manrope',-apple-system,BlinkMacSystemFont,sans-serif;
+}
+.stApp{
+    background:
+        radial-gradient(circle at 15% 8%, rgba(99,102,241,.10), transparent 38%),
+        radial-gradient(circle at 88% 20%, rgba(16,185,129,.08), transparent 40%),
+        radial-gradient(circle at 50% 100%, rgba(236,72,153,.06), transparent 45%),
+        #0b1120;
+}
 .block-container{max-width:1480px;padding-top:1.5rem;padding-bottom:3rem}
+
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:#0b1120}
+::-webkit-scrollbar-thumb{
+    background:linear-gradient(180deg,#6366f1,#10b981);
+    border-radius:10px;
+}
+
+@keyframes ml-gradient-shift{
+    0%{background-position:0% 50%}
+    50%{background-position:100% 50%}
+    100%{background-position:0% 50%}
+}
+@keyframes ml-float{
+    0%,100%{transform:translateY(0)}
+    50%{transform:translateY(-6px)}
+}
+@keyframes ml-fade-in{
+    from{opacity:0;transform:translateY(8px)}
+    to{opacity:1;transform:translateY(0)}
+}
 
 /* ── Hero banner ── */
 .ml-hero{
     background:
-        radial-gradient(ellipse at 90% 0%,rgba(99,102,241,.32),transparent 55%),
-        radial-gradient(ellipse at 10% 100%,rgba(16,185,129,.18),transparent 50%),
-        linear-gradient(145deg,#0f172a 0%,#1e293b 100%);
+        radial-gradient(ellipse at 90% 0%,rgba(99,102,241,.38),transparent 55%),
+        radial-gradient(ellipse at 10% 100%,rgba(16,185,129,.22),transparent 50%),
+        radial-gradient(ellipse at 50% 50%,rgba(236,72,153,.10),transparent 60%),
+        linear-gradient(145deg,#0d1424 0%,#161f36 55%,#101828 100%);
+    background-size:200% 200%;
+    animation:ml-gradient-shift 14s ease infinite;
     border:1px solid rgba(148,163,184,.18);
-    border-radius:24px;
-    padding:42px 44px;
+    border-radius:28px;
+    padding:48px 48px;
     margin-bottom:28px;
     color:#f8fafc;
     position:relative;
     overflow:hidden;
+    box-shadow:0 30px 80px -20px rgba(99,102,241,.35), inset 0 1px 0 rgba(255,255,255,.06);
 }
 .ml-hero::before{
     content:"";position:absolute;inset:0;
-    background:url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%239C92AC' fill-opacity='0.03'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+    background:url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%239C92AC' fill-opacity='0.04'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
     pointer-events:none;
 }
+.ml-hero::after{
+    content:"";position:absolute;top:-40%;right:-10%;width:420px;height:420px;
+    background:radial-gradient(circle,rgba(99,102,241,.35),transparent 70%);
+    filter:blur(10px);animation:ml-float 8s ease-in-out infinite;pointer-events:none;
+}
 .ml-eyebrow{
+    display:inline-flex;align-items:center;gap:8px;
     color:#a5b4fc;font-size:11px;font-weight:700;
-    letter-spacing:2.8px;margin-bottom:14px;
+    letter-spacing:2.8px;margin-bottom:16px;
+    text-transform:uppercase;
+}
+.ml-eyebrow::before{
+    content:"";width:7px;height:7px;border-radius:50%;
+    background:linear-gradient(135deg,#818cf8,#34d399);
+    box-shadow:0 0 10px rgba(129,140,248,.9);
 }
 .ml-hero h1{
-    color:#f8fafc;font-size:clamp(30px,4.5vw,48px);
+    font-family:'Outfit',sans-serif;
+    background:linear-gradient(100deg,#ffffff 20%,#c7d2fe 55%,#6ee7b7 80%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    font-size:clamp(32px,4.6vw,50px);font-weight:800;
     letter-spacing:-1.8px;margin:0 0 14px;line-height:1.12;
 }
 .ml-hero p{
@@ -95,77 +147,101 @@ st.markdown("""
 }
 .ml-pill{
     display:inline-block;border-radius:999px;
-    padding:5px 13px;margin-top:16px;margin-right:8px;
-    background:rgba(165,180,252,.10);
-    border:1px solid rgba(165,180,252,.22);
-    color:#c7d2fe;font-size:11px;font-weight:600;
-    letter-spacing:1px;
+    padding:6px 15px;margin-top:16px;margin-right:8px;
+    background:linear-gradient(135deg,rgba(99,102,241,.16),rgba(16,185,129,.12));
+    border:1px solid rgba(165,180,252,.28);
+    color:#e0e7ff;font-size:11px;font-weight:700;
+    letter-spacing:.8px;
+    box-shadow:0 4px 14px rgba(99,102,241,.15);
+    transition:transform .2s, box-shadow .2s;
 }
+.ml-pill:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(99,102,241,.3)}
 
 /* ── Cards ── */
 .ml-card{
     border:1px solid rgba(148,163,184,.15);
-    border-radius:16px;padding:22px 26px;
-    background:linear-gradient(135deg,rgba(30,41,59,.45),rgba(15,23,42,.55));
+    border-radius:18px;padding:22px 26px;
+    background:linear-gradient(135deg,rgba(30,41,59,.55),rgba(15,23,42,.65));
+    backdrop-filter:blur(14px);
     margin-bottom:14px;
-    transition:border-color .2s;
+    box-shadow:0 8px 24px -12px rgba(0,0,0,.5);
+    transition:border-color .25s, transform .25s, box-shadow .25s;
+    animation:ml-fade-in .4s ease both;
 }
-.ml-card:hover{border-color:rgba(99,102,241,.4)}
+.ml-card:hover{
+    border-color:rgba(99,102,241,.5);
+    transform:translateY(-3px);
+    box-shadow:0 16px 34px -14px rgba(99,102,241,.35);
+}
 
 .ml-card-normal{border-left:4px solid #10b981}
 .ml-card-borderline{border-left:4px solid #f59e0b}
 .ml-card-abnormal{border-left:4px solid #f43f5e}
 .ml-card-informational{border-left:4px solid #6366f1}
 
-.ml-card h4{margin:0 0 6px;font-size:16px;color:#f1f5f9}
+.ml-card h4{margin:0 0 6px;font-size:16.5px;color:#f8fafc;font-family:'Outfit',sans-serif;font-weight:600}
 .ml-card p{margin:0 0 4px;font-size:14px;color:#cbd5e1;line-height:1.65}
 .ml-card .ml-label{
-    font-size:11px;font-weight:600;letter-spacing:1.2px;
+    font-size:11px;font-weight:700;letter-spacing:1.4px;
     text-transform:uppercase;margin-bottom:8px;
 }
 
 /* ── Metric tiles ── */
 .ml-metric{
-    text-align:center;padding:20px 14px;
-    border-radius:16px;
-    background:linear-gradient(135deg,rgba(30,41,59,.5),rgba(15,23,42,.6));
-    border:1px solid rgba(148,163,184,.12);
+    text-align:center;padding:24px 14px;
+    border-radius:18px;
+    background:linear-gradient(160deg,rgba(30,41,59,.6),rgba(15,23,42,.7));
+    backdrop-filter:blur(14px);
+    border:1px solid rgba(148,163,184,.14);
+    box-shadow:0 10px 28px -16px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.05);
+    transition:transform .25s, box-shadow .25s, border-color .25s;
 }
-.ml-metric .num{font-size:36px;font-weight:800;letter-spacing:-1px;line-height:1.1}
-.ml-metric .lbl{font-size:12px;color:#94a3b8;margin-top:4px;letter-spacing:.5px}
+.ml-metric:hover{
+    transform:translateY(-4px) scale(1.02);
+    border-color:rgba(99,102,241,.4);
+    box-shadow:0 18px 36px -16px rgba(99,102,241,.3);
+}
+.ml-metric .ico{font-size:18px;margin-bottom:6px;opacity:.85}
+.ml-metric .num{font-family:'Outfit',sans-serif;font-size:38px;font-weight:800;letter-spacing:-1px;line-height:1.1}
+.ml-metric .lbl{font-size:11.5px;color:#94a3b8;margin-top:6px;letter-spacing:.8px;text-transform:uppercase;font-weight:600}
 
 /* ── Summary box ── */
 .ml-summary{
-    border-radius:18px;padding:28px 32px;
-    background:linear-gradient(135deg,rgba(99,102,241,.08),rgba(16,185,129,.06));
-    border:1px solid rgba(99,102,241,.18);
+    border-radius:20px;padding:30px 34px;
+    background:linear-gradient(135deg,rgba(99,102,241,.10),rgba(16,185,129,.07));
+    border:1px solid rgba(99,102,241,.22);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.05), 0 12px 30px -18px rgba(99,102,241,.3);
     line-height:1.8;color:#e2e8f0;font-size:15px;
 }
 
 /* ── Glossary ── */
 .ml-glossary{
-    border-radius:14px;padding:16px 22px;
-    background:rgba(30,41,59,.45);
-    border:1px solid rgba(148,163,184,.12);
+    border-radius:16px;padding:16px 22px;
+    background:linear-gradient(135deg,rgba(30,41,59,.55),rgba(15,23,42,.5));
+    border:1px solid rgba(148,163,184,.14);
+    border-left:3px solid #818cf8;
     margin-bottom:10px;
+    transition:border-color .2s, transform .2s;
 }
-.ml-glossary strong{color:#a5b4fc;font-size:14px}
+.ml-glossary:hover{border-color:#a5b4fc;transform:translateX(2px)}
+.ml-glossary strong{color:#a5b4fc;font-size:14px;font-family:'Outfit',sans-serif}
 .ml-glossary span{color:#cbd5e1;font-size:13.5px;line-height:1.65}
 
 /* ── Questions card ── */
 .ml-question{
-    border-radius:12px;padding:14px 20px;
-    background:rgba(245,158,11,.06);
-    border:1px solid rgba(245,158,11,.18);
-    margin-bottom:8px;color:#fbbf24;
+    border-radius:14px;padding:16px 22px;
+    background:linear-gradient(135deg,rgba(245,158,11,.09),rgba(245,158,11,.04));
+    border:1px solid rgba(245,158,11,.22);
+    margin-bottom:10px;color:#fbbf24;
     font-size:14px;line-height:1.6;
+    box-shadow:0 8px 20px -14px rgba(245,158,11,.3);
 }
 
 /* ── Disclaimer ── */
 .ml-disclaimer{
-    border-radius:14px;padding:18px 24px;
-    background:rgba(239,68,68,.06);
-    border:1px solid rgba(239,68,68,.18);
+    border-radius:16px;padding:18px 24px;
+    background:linear-gradient(135deg,rgba(239,68,68,.09),rgba(239,68,68,.04));
+    border:1px solid rgba(239,68,68,.22);
     color:#fca5a5;font-size:13px;line-height:1.7;
     margin-top:10px;
 }
@@ -174,8 +250,8 @@ st.markdown("""
 .ml-evidence{
     border-left:3px solid #6366f1;
     padding:12px 18px;margin:8px 0;
-    background:rgba(99,102,241,.05);
-    border-radius:0 12px 12px 0;
+    background:linear-gradient(90deg,rgba(99,102,241,.08),transparent);
+    border-radius:0 14px 14px 0;
     font-size:13.5px;color:#cbd5e1;
     line-height:1.65;white-space:pre-wrap;
     overflow-wrap:anywhere;
@@ -184,15 +260,93 @@ st.markdown("""
 /* ── OCR preview ── */
 .ml-ocr-badge{
     display:inline-block;border-radius:999px;
-    padding:4px 12px;margin:4px 4px 4px 0;
-    font-size:11px;font-weight:600;letter-spacing:.8px;
+    padding:5px 13px;margin:4px 4px 4px 0;
+    font-size:11px;font-weight:700;letter-spacing:.8px;
 }
-.ml-ocr-good{background:rgba(16,185,129,.12);color:#6ee7b7;border:1px solid rgba(16,185,129,.25)}
-.ml-ocr-fair{background:rgba(245,158,11,.12);color:#fcd34d;border:1px solid rgba(245,158,11,.25)}
-.ml-ocr-poor{background:rgba(239,68,68,.12);color:#fca5a5;border:1px solid rgba(239,68,68,.25)}
+.ml-ocr-good{background:rgba(16,185,129,.14);color:#6ee7b7;border:1px solid rgba(16,185,129,.3)}
+.ml-ocr-fair{background:rgba(245,158,11,.14);color:#fcd34d;border:1px solid rgba(245,158,11,.3)}
+.ml-ocr-poor{background:rgba(239,68,68,.14);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
+
+/* ── Sidebar ── */
+section[data-testid="stSidebar"]{
+    background:linear-gradient(180deg,#0d1424 0%,#0b1120 100%);
+    border-right:1px solid rgba(148,163,184,.12);
+}
+section[data-testid="stSidebar"] .block-container{padding-top:1.6rem}
+
+/* ── Buttons ── */
+.stButton>button, .stDownloadButton>button{
+    border-radius:12px !important;
+    font-weight:700 !important;
+    letter-spacing:.3px;
+    transition:transform .18s, box-shadow .18s !important;
+    border:1px solid rgba(148,163,184,.18) !important;
+}
+button[kind="primary"], .stButton>button[kind="primary"]{
+    background:linear-gradient(120deg,#6366f1,#818cf8 45%,#10b981) !important;
+    background-size:180% 180% !important;
+    border:none !important;
+    color:#fff !important;
+    box-shadow:0 10px 28px -10px rgba(99,102,241,.55) !important;
+}
+button[kind="primary"]:hover{
+    transform:translateY(-2px);
+    box-shadow:0 16px 36px -10px rgba(99,102,241,.7) !important;
+    background-position:100% 0 !important;
+}
+.stButton>button:hover, .stDownloadButton>button:hover{transform:translateY(-2px)}
+
+/* ── Tabs ── */
+.stTabs [data-baseweb="tab-list"]{
+    gap:6px;background:rgba(15,23,42,.4);
+    padding:6px;border-radius:14px;
+    border:1px solid rgba(148,163,184,.12);
+}
+.stTabs [data-baseweb="tab"]{
+    border-radius:10px;color:#94a3b8;font-weight:600;
+    padding:10px 18px;
+}
+.stTabs [aria-selected="true"]{
+    background:linear-gradient(120deg,rgba(99,102,241,.25),rgba(16,185,129,.18)) !important;
+    color:#f1f5f9 !important;
+}
+
+/* ── Inputs / expander / uploader ── */
+.stTextInput input, .stTextArea textarea{
+    background:rgba(15,23,42,.55) !important;
+    border-radius:12px !important;
+    border:1px solid rgba(148,163,184,.18) !important;
+}
+[data-testid="stFileUploaderDropzone"]{
+    background:linear-gradient(135deg,rgba(99,102,241,.06),rgba(16,185,129,.04)) !important;
+    border:1.5px dashed rgba(129,140,248,.35) !important;
+    border-radius:16px !important;
+}
+.streamlit-expanderHeader{
+    background:rgba(30,41,59,.4) !important;
+    border-radius:12px !important;
+}
+div[data-testid="stExpander"]{
+    border:1px solid rgba(148,163,184,.14) !important;
+    border-radius:16px !important;
+    overflow:hidden;
+}
+
+/* ── Code block ── */
+.stCodeBlock, pre{
+    border-radius:14px !important;
+    border:1px solid rgba(148,163,184,.14) !important;
+}
+
+/* ── Alerts ── */
+div[data-testid="stAlert"]{
+    border-radius:14px !important;
+    backdrop-filter:blur(10px);
+}
 
 /* ── Hide Streamlit branding ── */
 footer{visibility:hidden}
+#MainMenu{visibility:hidden}
 </style>
 """, unsafe_allow_html=True)
 
@@ -633,7 +787,7 @@ st.markdown("""
         nothing is invented, nothing is sourced externally.
     </p>
     <span class="ml-pill">🔒 YOUR DATA ONLY</span>
-    <span class="ml-pill">🚫 ZERO HALLUCINATION</span>
+    <span class="ml-pill">🎯 GROUNDED IN YOUR TEXT</span>
     <span class="ml-pill">📷 OCR SUPPORTED</span>
     <span class="ml-pill">📄 EVIDENCE CITED</span>
     <span class="ml-pill">⚕️ NOT MEDICAL ADVICE</span>
@@ -793,9 +947,9 @@ with st.expander(
 
         if ocr_used:
             st.markdown("""
-            <div style="border-radius:12px;padding:14px 20px;
-                background:rgba(99,102,241,.06);
-                border:1px solid rgba(99,102,241,.15);
+            <div style="border-radius:14px;padding:14px 20px;
+                background:linear-gradient(135deg,rgba(99,102,241,.08),rgba(99,102,241,.03));
+                border:1px solid rgba(99,102,241,.18);
                 color:#a5b4fc;font-size:13px;line-height:1.6;margin-bottom:12px">
                 <strong>📷 OCR Notice:</strong> This text was extracted using
                 optical character recognition. Some characters, numbers, or
@@ -869,9 +1023,9 @@ st.markdown("")
 # ── OCR reminder banner ──
 if ocr_used:
     st.markdown("""
-    <div style="border-radius:14px;padding:16px 22px;
-        background:rgba(245,158,11,.06);
-        border:1px solid rgba(245,158,11,.18);
+    <div style="border-radius:16px;padding:16px 22px;
+        background:linear-gradient(135deg,rgba(245,158,11,.08),rgba(245,158,11,.03));
+        border:1px solid rgba(245,158,11,.2);
         color:#fcd34d;font-size:13px;line-height:1.7;margin-bottom:16px">
         <strong>📷 OCR Mode Active</strong> — This report was read from an
         image/scan. Some values may have been misread by OCR.
@@ -889,15 +1043,16 @@ info_n = sum(1 for v in tr.lab_values if v.status == "Informational")
 
 c1, c2, c3, c4, c5 = st.columns(5)
 
-for col, num, label, color in [
-    (c1, total, "Values Found", "#a5b4fc"),
-    (c2, normal_n, "Normal", STATUS_COLORS["Normal"]),
-    (c3, borderline_n, "Borderline", STATUS_COLORS["Borderline"]),
-    (c4, abnormal_n, "Abnormal", STATUS_COLORS["Abnormal"]),
-    (c5, info_n, "Informational", STATUS_COLORS["Informational"]),
+for col, num, label, color, icon in [
+    (c1, total, "Values Found", "#a5b4fc", "📊"),
+    (c2, normal_n, "Normal", STATUS_COLORS["Normal"], "✅"),
+    (c3, borderline_n, "Borderline", STATUS_COLORS["Borderline"], "⚠️"),
+    (c4, abnormal_n, "Abnormal", STATUS_COLORS["Abnormal"], "🔴"),
+    (c5, info_n, "Informational", STATUS_COLORS["Informational"], "ℹ️"),
 ]:
     col.markdown(
         f'<div class="ml-metric">'
+        f'<div class="ico">{icon}</div>'
         f'<div class="num" style="color:{color}">{num}</div>'
         f'<div class="lbl">{label}</div></div>',
         unsafe_allow_html=True,
@@ -971,7 +1126,7 @@ with tab_summary:
                 margin=dict(l=10, r=10, t=30, b=10),
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(family="Inter, sans-serif", color="#e2e8f0"),
+                font=dict(family="Manrope, sans-serif", color="#e2e8f0"),
                 showlegend=False,
                 annotations=[dict(
                     text=f"<b>{total}</b><br>values",
@@ -1250,9 +1405,9 @@ with tab_ask:
 
 st.divider()
 st.markdown("""
-<div style="text-align:center;padding:20px 0 10px">
+<div style="text-align:center;padding:24px 0 10px">
     <span style="color:#64748b;font-size:13px">
-        🩺 MedLens · Built with Streamlit + Groq ·
+        🩺 <strong style="color:#94a3b8">MedLens</strong> · Built with Streamlit + Groq (openai/gpt-oss-120b) ·
         Your data stays in this session · AI explains, never diagnoses ·
         📷 OCR powered by Tesseract ·
         <strong>Always consult your physician</strong>
