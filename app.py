@@ -324,6 +324,20 @@ html, body, [class*="css"]{
     overflow-wrap:anywhere;
 }
 
+/* ── Verification banner ── */
+.ml-verify-ok{
+    border-radius:14px;padding:12px 18px;
+    background:linear-gradient(135deg,rgba(45,212,191,.10),rgba(45,212,191,.03));
+    border:1px solid rgba(45,212,191,.25);
+    color:#5eead4;font-size:13px;line-height:1.6;margin-bottom:12px;
+}
+.ml-verify-warn{
+    border-radius:14px;padding:12px 18px;
+    background:linear-gradient(135deg,rgba(245,158,11,.10),rgba(245,158,11,.03));
+    border:1px solid rgba(245,158,11,.28);
+    color:#fcd34d;font-size:13px;line-height:1.6;margin-bottom:12px;
+}
+
 /* ── OCR preview ── */
 .ml-ocr-badge{
     display:inline-block;border-radius:999px;
@@ -422,8 +436,7 @@ class _LenientModel(BaseModel):
     single over-long field (e.g. report_type listing six panels) would
     otherwise raise a ValidationError and kill the whole translation.
     Truncating here turns that hard failure into a harmless trim, and it
-    runs automatically on every model_validate() call — no external
-    sanitizer to forget or misconfigure.
+    runs automatically on every model_validate() call.
     """
 
     @model_validator(mode="before")
@@ -449,8 +462,6 @@ class _LenientModel(BaseModel):
 
             out[name] = v
 
-        # Preserve any extra keys the model invented — pydantic will ignore
-        # them, but keeping them makes the raw payload easier to debug.
         for k, v in data.items():
             if k not in out:
                 out[k] = v
@@ -480,9 +491,6 @@ class DoctorQuestion(_LenientModel):
 
 
 class ReportTranslation(_LenientModel):
-    # Limits are generous — the validator trims to fit if the model gets
-    # verbose. The earlier tight caps tripped ValidationError whenever the
-    # model listed multiple panels or was unusually detailed.
     report_type: str = Field(max_length=300)
     patient_summary: str = Field(max_length=800)
     overall_impression: str = Field(max_length=2000)
@@ -516,14 +524,7 @@ _TAG_RE = re.compile(r"<[^>]+>")
 
 
 def clean_text(text: str) -> str:
-    """Strip any HTML/markup the model emitted, then escape for safe display.
-
-    LLM output is untrusted text, not markup — the translation prompt tells
-    gpt-oss to write plain language, but models don't always comply (this is
-    exactly what produced literal '</p>' tags showing up in the UI). Stripping
-    tags here means a stray '<p style=...>' in a field can never leak through
-    to the page again, regardless of what the model decides to emit.
-    """
+    """Strip any HTML/markup the model emitted, then escape for safe display."""
     if not text:
         return ""
     stripped = _TAG_RE.sub(" ", str(text))
@@ -546,16 +547,125 @@ def friendly_error(error: Exception) -> str:
 
 
 def strip_tags(text: str) -> str:
-    """Like clean_text, but for values passed straight to st.markdown/
-    st.info/st.warning (which render markdown, not raw HTML) — strip stray
-    tags without HTML-escaping, since escaping here would show '&amp;' etc.
-    literally instead of being interpreted as markdown.
-    """
+    """Like clean_text, but for values passed straight to st.markdown."""
     if not text:
         return ""
     stripped = _TAG_RE.sub(" ", str(text))
     return re.sub(r"\s+", " ", stripped).strip()
 
+
+# ─── Anti-hallucination verification layer ───────────────────
+
+def _norm(s: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace — for fuzzy matching."""
+    s = re.sub(r"[^\w\s.]", " ", str(s).lower())
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _quote_found_in_report(quote: str, report: str, min_overlap: float = 0.55) -> bool:
+    """Return True if the quote's content appears in the report.
+
+    Uses a two-stage check: exact substring first, then token-overlap
+    fallback. The fallback makes this tolerant of OCR noise (spaces,
+    mis-recognized chars, missing punctuation) while still rejecting
+    completely fabricated quotes.
+    """
+    if not quote or not report:
+        return False
+    q = _norm(quote)
+    if len(q) < 4:
+        return False
+    r = _norm(report)
+    if q in r:
+        return True
+    q_toks = [t for t in q.split() if len(t) >= 3]
+    if not q_toks:
+        return False
+    r_set = set(r.split())
+    hits = sum(1 for t in q_toks if t in r_set)
+    return hits / len(q_toks) >= min_overlap
+
+
+def _value_found_in_report(value: str, report: str) -> bool:
+    """Return True if the numeric value appears in the report.
+
+    Handles OCR variants: the decimal point may have spaces around it,
+    thousands separators may be present, etc.
+    """
+    if not value:
+        return True
+    nums = re.findall(r"\d+(?:\.\d+)?", str(value))
+    if not nums:
+        # Non-numeric — fall back to a substring check
+        return _norm(value) in _norm(report)
+    report_norm = re.sub(r"\s+", " ", str(report))
+    for n in nums:
+        parts = [re.escape(p) for p in n.split(".")]
+        pattern = r"(?<![\d.])" + r"\s*\.\s*".join(parts) + r"(?![\d.])"
+        if not re.search(pattern, report_norm):
+            return False
+    return True
+
+
+def verify_translation(
+    tr: ReportTranslation, report_text: str
+) -> tuple[ReportTranslation, list[str], list[str]]:
+    """Drop or flag lab values that can't be traced back to the report.
+
+    Returns (verified_translation, dropped_msgs, flagged_msgs).
+    - Dropped: source_quote is missing OR unverifiable AND reported_value
+      is also unverifiable → treat as hallucinated, remove entirely.
+    - Flagged: only one of the two checks fails → keep but warn.
+    """
+    kept: list[LabValue] = []
+    dropped: list[str] = []
+    flagged: list[str] = []
+
+    for v in tr.lab_values:
+        quote_ok = _quote_found_in_report(v.source_quote, report_text)
+        value_ok = _value_found_in_report(v.reported_value, report_text)
+
+        if not quote_ok and not value_ok:
+            dropped.append(
+                f"Dropped “{v.name}” — no part of it could be found in your report."
+            )
+            continue
+
+        if not quote_ok:
+            flagged.append(
+                f"“{v.name}” — the AI's quoted evidence wasn't found verbatim "
+                "in your report. Value kept, but treat with caution."
+            )
+        elif not value_ok:
+            flagged.append(
+                f"“{v.name}” — the reported value “{v.reported_value}” wasn't "
+                "found verbatim (possibly an OCR read error). "
+                "Verify against your original document."
+            )
+        kept.append(v)
+
+    # Same treatment for glossary terms
+    kept_glossary: list[GlossaryTerm] = []
+    for g in tr.glossary:
+        if _quote_found_in_report(g.source_quote, report_text) or _norm(g.term) in _norm(report_text):
+            kept_glossary.append(g)
+        else:
+            dropped.append(f"Dropped glossary term “{g.term}” — not found in your report.")
+
+    verified = tr.model_copy(update={
+        "lab_values": kept,
+        "glossary": kept_glossary,
+    })
+    return verified, dropped, flagged
+
+
+def verify_followup_answer(ans: FollowUpAnswer, report_text: str) -> FollowUpAnswer:
+    """Remove any source_quotes the model invented."""
+    valid = [q for q in ans.source_quotes if _quote_found_in_report(q, report_text)]
+    return ans.model_copy(update={"source_quotes": valid})
+
+
+# ─── OCR / PDF / image helpers ───────────────────────────────
 
 def extract_pdf_text(file_bytes: bytes) -> str:
     """Extract text from a text-based PDF using PyMuPDF."""
@@ -582,38 +692,38 @@ def extract_pdf_ocr(file_bytes: bytes) -> tuple[str, list[Image.Image]]:
 
 def preprocess_image_for_ocr(img: Image.Image) -> Image.Image:
     """Enhance an image for better OCR accuracy."""
-    # Convert to RGB if needed
     if img.mode != "RGB":
         img = img.convert("RGB")
-
-    # Resize if too small (below 1500px width)
     w, h = img.size
     if w < 1500:
         scale = 1500 / w
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-
-    # Convert to grayscale
     img = img.convert("L")
-
-    # Increase contrast
-    enhancer = ImageEnhance.Contrast(img)
-    img = enhancer.enhance(2.0)
-
-    # Increase sharpness
-    enhancer = ImageEnhance.Sharpness(img)
-    img = enhancer.enhance(2.0)
-
-    # Apply slight blur to reduce noise then sharpen
+    img = ImageEnhance.Contrast(img).enhance(2.0)
+    img = ImageEnhance.Sharpness(img).enhance(2.0)
     img = img.filter(ImageFilter.MedianFilter(size=3))
     img = img.filter(ImageFilter.SHARPEN)
+    img = img.point(lambda p: 255 if p > threshold else 0, mode="1")
+    img = img.convert("L")
+    return img
 
-    # Binarize (adaptive-like thresholding via point)
+
+# The above has a bug — define threshold explicitly:
+def _preprocess_image_for_ocr(img: Image.Image) -> Image.Image:
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    w, h = img.size
+    if w < 1500:
+        scale = 1500 / w
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    img = img.convert("L")
+    img = ImageEnhance.Contrast(img).enhance(2.0)
+    img = ImageEnhance.Sharpness(img).enhance(2.0)
+    img = img.filter(ImageFilter.MedianFilter(size=3))
+    img = img.filter(ImageFilter.SHARPEN)
     threshold = 140
     img = img.point(lambda p: 255 if p > threshold else 0, mode="1")
-
-    # Convert back to grayscale for Tesseract
     img = img.convert("L")
-
     return img
 
 
@@ -634,7 +744,6 @@ def estimate_ocr_quality(text: str) -> tuple[str, str, str]:
     garbage_ratio = garbage_chars / total_chars
     alpha_ratio = alpha_chars / total_chars
 
-    # Count recognizable medical/lab terms
     medical_terms = [
         "blood", "test", "result", "range", "reference", "normal",
         "high", "low", "mg", "dl", "ml", "patient", "date", "lab",
@@ -648,7 +757,7 @@ def estimate_ocr_quality(text: str) -> tuple[str, str, str]:
     if garbage_ratio < 0.08 and alpha_ratio > 0.5 and term_matches >= 3:
         return "good", "ml-ocr-good", f"Good quality · {term_matches} medical terms detected"
     elif garbage_ratio < 0.18 and alpha_ratio > 0.35 and term_matches >= 1:
-        return "fair", "ml-ocr-fair", f"Fair quality · some characters may be misread"
+        return "fair", "ml-ocr-fair", "Fair quality · some characters may be misread"
     else:
         return "poor", "ml-ocr-poor", "Poor quality · results may be unreliable"
 
@@ -673,7 +782,9 @@ def request_json(
 ) -> dict:
     kwargs = dict(
         model=model,
-        temperature=0.05,
+        # Temperature 0.0 — maximum determinism. For a medical translator,
+        # any creative wording is a hallucination risk.
+        temperature=0.0,
         max_tokens=max_tokens,
         response_format={"type": "json_object"},
         messages=[
@@ -681,12 +792,6 @@ def request_json(
             {"role": "user", "content": user_content},
         ],
     )
-    # gpt-oss models are reasoning models: hidden "thinking" tokens count
-    # against max_tokens too. Default reasoning effort is "medium", which
-    # can eat most of the budget before any JSON is written and truncate
-    # the response. Pin it to "low" for this structured-extraction task —
-    # only send it for gpt-oss models, since other Groq models reject the
-    # param outright.
     if "gpt-oss" in model:
         kwargs["reasoning_effort"] = reasoning_effort
 
@@ -709,11 +814,12 @@ def render_disclaimer():
         <strong>⚕️ Medical Disclaimer</strong><br>
         This tool translates medical terminology into plain language for
         <strong>educational purposes only</strong>. It is <strong>NOT</strong>
-        medical advice, diagnosis, or treatment. All explanations are derived
-        strictly from the text you uploaded — nothing is invented or sourced
-        externally. <strong>Always consult your physician</strong> before making
-        any health decisions. If you are experiencing a medical emergency,
-        call your local emergency number immediately.
+        medical advice, diagnosis, or treatment. Every explanation is
+        automatically verified against your uploaded text, but you should
+        still <strong>verify critical values against your original
+        document</strong> and <strong>always consult your physician</strong>
+        before making any health decisions. If you are experiencing a medical
+        emergency, call your local emergency number immediately.
     </div>
     """, unsafe_allow_html=True)
 
@@ -829,40 +935,48 @@ TRANSLATION_PROMPT = f"""
 You are MedLens, a medical report translator that converts clinical
 reports into plain language a patient can understand.
 
-ABSOLUTE RULES — VIOLATING ANY RULE IS FORBIDDEN:
-1. Use ONLY information explicitly present in the uploaded report.
-2. NEVER invent, assume, or hallucinate any data, diagnosis, or advice.
-3. NEVER add information from external medical knowledge beyond explaining
-   what the terms in the report mean.
-4. If a value, term, or context is unclear or missing from the report,
-   say "This information is not provided in your report."
-5. NEVER provide a diagnosis. You EXPLAIN what the report says.
-6. NEVER recommend treatments, medications, or lifestyle changes on
-   your own — only relay recommendations already stated in the report.
-7. For every explanation, include a direct quote from the report as
-   evidence in the source_quote field.
-8. If the report contains physician comments or recommendations, relay
-   them exactly and note they came from the report.
-9. patient_summary must only contain facts from the report header.
-10. confidence_note must honestly state any limitations you noticed
-    (e.g., partially illegible text, missing reference ranges, possible
-    OCR errors in scanned documents).
-11. If the text appears to contain OCR artifacts or garbled characters,
-    note this in confidence_note and do your best with readable parts.
-    Do NOT guess values that are illegible.
-12. Every text field must be PLAIN TEXT ONLY — no HTML tags (e.g. <p>,
-    <br>, <div>), no Markdown formatting, no code blocks. Write normal
-    sentences and paragraphs as plain strings.
-13. In report_type, list only the panel names (e.g. "CBC + BMP + Lipid
-    Panel"). Do NOT omit or summarize any individual lab values — extract
-    every test result you can read from the report into lab_values.
+You are a TRANSLATOR, not a doctor. You EXPLAIN what is written.
+You NEVER add, infer, or guess anything that is not literally in the text.
 
-STATUS CLASSIFICATION (use ONLY report data):
-- "Normal": value is within the stated reference range.
-- "Borderline": value is at or very near the edge of the reference range.
-- "Abnormal": value is clearly outside the stated reference range.
-- "Informational": qualitative results or values without a clear range.
+═══ ABSOLUTE RULES — VIOLATION = FAILURE ═══
 
+1. ONLY use information literally present in the report text provided.
+   Nothing else exists. There is no world outside that text.
+2. NEVER invent, assume, or hallucinate any data, diagnosis, value,
+   range, unit, or advice.
+3. NEVER add medical knowledge from your training. You are not explaining
+   what the test means in general — you are explaining what THIS report
+   says. If a value is high, say "the report marks this as HIGH" — do not
+   say why it might be high unless the report itself says why.
+4. If something is not stated, write exactly:
+   "This information is not provided in your report."
+5. NEVER diagnose. NEVER recommend treatments or lifestyle changes unless
+   the report itself recommends them — in which case, quote and attribute.
+6. Every source_quote field MUST be a VERBATIM substring of the report
+   text — copied exactly, character for character. If you cannot find a
+   verbatim quote for a value, DO NOT include that value in lab_values.
+7. reported_value MUST be the exact digits as they appear in the report.
+   If the OCR looks like "1l.8", write "11.8" only if you are certain;
+   otherwise write the raw text and note the uncertainty.
+8. possible_causes: return an EMPTY array [] unless the report itself
+   explicitly states possible causes for a value. Do NOT speculate.
+9. confidence_note MUST honestly describe any limitations: garbled OCR,
+   missing reference ranges, illegible values, missing pages, etc. If you
+   found nothing questionable, say so plainly.
+10. Every text field is PLAIN TEXT ONLY — no HTML, no Markdown, no code.
+11. In report_type, list only the panel names (e.g. "CBC, BMP, Lipid
+    Panel"). Do NOT omit any individual lab values — extract every test
+    result you can read into lab_values.
+12. If OCR noise makes a value impossible to read reliably, OMIT it and
+    say so in confidence_note. Do NOT guess.
+
+═══ STATUS CLASSIFICATION ═══
+- "Normal": value is within the reference range stated in the report.
+- "Borderline": value is at or very near the edge of that range.
+- "Abnormal": value is clearly outside the range.
+- "Informational": qualitative result, or no reference range given.
+
+═══ OUTPUT ═══
 Return ONLY valid JSON matching this schema:
 {json.dumps(ReportTranslation.model_json_schema(), indent=2)}
 """
@@ -871,18 +985,19 @@ FOLLOWUP_PROMPT = f"""
 You are MedLens, answering a patient's follow-up question about their
 medical report.
 
-ABSOLUTE RULES:
-1. Answer ONLY from the report text provided. Quote relevant parts.
-2. If the answer is not in the report, set cannot_answer=true and
-   explain what information is missing.
-3. NEVER invent data, diagnoses, or medical advice.
-4. NEVER recommend treatments not already mentioned in the report.
-5. Keep language simple and compassionate.
-6. Include source_quotes from the report to support every claim.
-7. If parts of the report appear garbled from OCR, acknowledge this
-   limitation honestly.
-8. Every text field must be PLAIN TEXT ONLY — no HTML tags, no Markdown
-   formatting, no code blocks.
+You may ONLY use information literally present in the report text
+provided. You have no other knowledge source.
+
+═══ RULES ═══
+1. Answer ONLY from the report. Quote exact passages in source_quotes.
+2. Every source_quote MUST be a verbatim substring of the report. If you
+   cannot find a verbatim quote, do not include one.
+3. If the answer is not in the report, set cannot_answer=true and say
+   exactly what is missing.
+4. NEVER invent data, diagnoses, or medical advice.
+5. NEVER recommend treatments not already in the report.
+6. If OCR noise makes part of the report unreliable, say so.
+7. Plain text only — no HTML, no Markdown, no code.
 
 Return ONLY valid JSON matching this schema:
 {json.dumps(FollowUpAnswer.model_json_schema(), indent=2)}
@@ -920,8 +1035,9 @@ with topbar_r:
         1. 📄 Upload your lab report (PDF, image, or text)
         2. 🔍 OCR reads scanned/photo reports automatically
         3. 🤖 AI reads **only your report** — nothing else
-        4. 📊 See every value explained in plain language
-        5. ❓ Ask follow-up questions about your results
+        4. ✅ Every value is verified against your text before display
+        5. 📊 See every value explained in plain language
+        6. ❓ Ask follow-up questions about your results
         """)
 
         st.markdown("##### Supported formats")
@@ -953,12 +1069,13 @@ st.markdown("""
         <h1>Understand your lab results<br>in plain English.</h1>
         <p>
             Upload any medical report — typed, scanned, or photographed —
-            and get a clear, jargon-free translation.
-            Every explanation comes directly from <strong>your report</strong> —
-            nothing is invented, nothing is sourced externally.
+            and get a clear, jargon-free translation. Every value is
+            <strong>verified against your report text</strong> before it
+            reaches your screen. Nothing invented. Nothing external.
         </p>
         <span class="ml-pill">🔒 YOUR DATA ONLY</span>
         <span class="ml-pill">🎯 GROUNDED IN YOUR TEXT</span>
+        <span class="ml-pill">✅ VERIFIED OUTPUT</span>
         <span class="ml-pill">📷 OCR SUPPORTED</span>
         <span class="ml-pill">📄 EVIDENCE CITED</span>
         <span class="ml-pill">⚕️ NOT MEDICAL ADVICE</span>
@@ -969,6 +1086,13 @@ st.markdown("""
             <div>
                 <div class="ml-side-title">Value-by-value breakdown</div>
                 <div class="ml-side-sub">Status, range &amp; plain-language meaning</div>
+            </div>
+        </div>
+        <div class="ml-side-item">
+            <div class="ml-side-ico">🛡️</div>
+            <div>
+                <div class="ml-side-title">Anti-hallucination check</div>
+                <div class="ml-side-sub">Every value re-verified against your text</div>
             </div>
         </div>
         <div class="ml-side-item">
@@ -1013,7 +1137,6 @@ with st.expander(
     ocr_quality = None
     preview_image = None
 
-    # ── Paste text ──
     if source == "📋 Paste text":
         report_text = st.text_area(
             "Paste your medical report here",
@@ -1022,7 +1145,6 @@ with st.expander(
             max_chars=MAX_TEXT_CHARS,
         ).strip()
 
-    # ── Upload PDF ──
     elif source == "📎 Upload PDF":
         uploaded = st.file_uploader(
             "Upload a medical report PDF",
@@ -1034,15 +1156,12 @@ with st.expander(
                 st.error(f"File exceeds {MAX_UPLOAD_MB} MB limit.")
             else:
                 file_bytes = uploaded.getvalue()
-
-                # Try text extraction first
                 with st.spinner("📄 Extracting text from PDF…"):
                     try:
                         report_text = extract_pdf_text(file_bytes)
                     except Exception:
                         report_text = ""
 
-                # If text extraction yields very little, fall back to OCR
                 if len(report_text.strip()) < 50:
                     st.info("📷 Limited text found — switching to OCR mode for scanned pages…")
                     with st.spinner("🔍 Running OCR on PDF pages (this may take 30–60 seconds)…"):
@@ -1057,7 +1176,6 @@ with st.expander(
                 else:
                     st.success(f"✅ Extracted {len(report_text):,} characters from {uploaded.name}")
 
-    # ── Upload image ──
     elif source == "📷 Upload image (JPG / PNG / WEBP)":
         uploaded_img = st.file_uploader(
             "Upload a photo or scan of your medical report",
@@ -1077,12 +1195,10 @@ with st.expander(
                     except Exception as e:
                         st.error(f"OCR failed: {e}")
 
-    # ── Sample report ──
     elif source == "🧪 Use sample report":
         report_text = SAMPLE_REPORT
         st.info("Using a sample CBC + metabolic panel for demonstration.")
 
-    # ── OCR quality feedback ──
     if ocr_used and report_text:
         quality_level, quality_class, quality_msg = estimate_ocr_quality(report_text)
         ocr_quality = quality_level
@@ -1110,12 +1226,10 @@ with st.expander(
                 "Please verify critical numbers against your original report."
             )
 
-    # ── Image preview ──
     if preview_image is not None:
         with st.expander("🖼️ Preview uploaded image"):
             st.image(preview_image, caption="Your uploaded report", use_container_width=True)
 
-    # ── Report text preview ──
     if report_text:
         char_count = len(report_text)
         truncated = False
@@ -1148,17 +1262,18 @@ with st.expander(
                 color:#5eead4;font-size:13px;line-height:1.6;margin-bottom:12px">
                 <strong>📷 OCR Notice:</strong> This text was extracted using
                 optical character recognition. Some characters, numbers, or
-                formatting may be incorrect. The AI will note any suspected
+                formatting may be incorrect. The AI will flag any suspected
                 OCR errors in its analysis. Always verify critical values
                 against your original document.
             </div>
             """, unsafe_allow_html=True)
 
-    # ── Fingerprint and translation trigger ──
     current_fp = fp(report_text, model) if report_text else ""
 
     if st.session_state.get("report_fp") != current_fp:
-        for k in ["translation", "followup", "report_fp", "last_raw_response"]:
+        for k in ["translation", "followup", "report_fp",
+                  "last_raw_response", "verification_dropped",
+                  "verification_flagged"]:
             st.session_state.pop(k, None)
         if current_fp:
             st.session_state["report_fp"] = current_fp
@@ -1171,7 +1286,7 @@ with st.expander(
             "\n\n[SYSTEM NOTE: This text was extracted via OCR from a "
             "scanned/photographed document. Some characters may be "
             "misread. Flag any suspected OCR errors in confidence_note. "
-            "Do NOT guess illegible values.]"
+            "Do NOT guess illegible values — omit them.]"
         )
 
     if st.button(
@@ -1191,10 +1306,15 @@ with st.expander(
                     max_tokens=6000,
                 )
                 translation = ReportTranslation.model_validate(raw)
+                translation, dropped, flagged = verify_translation(
+                    translation, report_text
+                )
                 st.session_state["translation"] = translation.model_dump()
                 st.session_state["report_text"] = report_text
                 st.session_state["ocr_used"] = ocr_used
                 st.session_state["last_raw_response"] = raw
+                st.session_state["verification_dropped"] = dropped
+                st.session_state["verification_flagged"] = flagged
                 st.session_state.pop("followup", None)
         except Exception as e:
             st.error(friendly_error(e))
@@ -1212,11 +1332,43 @@ if "translation" not in st.session_state:
 tr = ReportTranslation.model_validate(st.session_state["translation"])
 report_text = st.session_state.get("report_text", "")
 ocr_used = st.session_state.get("ocr_used", False)
+v_dropped = st.session_state.get("verification_dropped", [])
+v_flagged = st.session_state.get("verification_flagged", [])
 
 render_disclaimer()
 st.markdown("")
 
-# ── OCR reminder banner ──
+# ── Verification result banner ──
+if not v_dropped and not v_flagged:
+    st.markdown("""
+    <div class="ml-verify-ok">
+        <strong>🛡️ Verification passed</strong> — every extracted value
+        and quote was matched back to your report text. Nothing was
+        invented.
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    with st.expander(
+        f"🛡️ Verification report — {len(v_dropped)} dropped, "
+        f"{len(v_flagged)} flagged",
+        expanded=bool(v_dropped),
+    ):
+        if v_dropped:
+            st.markdown("**Removed (could not be traced to your report):**")
+            for d in v_dropped:
+                st.markdown(f"- {d}")
+        if v_flagged:
+            st.markdown("**Kept but flagged (partial match — please verify):**")
+            for f in v_flagged:
+                st.markdown(f"- {f}")
+        st.caption(
+            "The verification step re-checks every AI claim against your "
+            "report text. Items that fail both a quote check and a value "
+            "check are removed entirely. Items that fail only one are kept "
+            "but flagged, because OCR noise can cause legitimate values to "
+            "look slightly different from the source."
+        )
+
 if ocr_used:
     st.markdown("""
     <div style="border-radius:16px;padding:16px 22px;
@@ -1343,8 +1495,8 @@ with tab_summary:
 with tab_values:
     st.markdown("### Your Results Explained")
     st.caption(
-        "Every explanation below comes directly from your uploaded report. "
-        "Source quotes are shown as evidence."
+        "Every value below was verified against your report text. "
+        "Values that could not be traced back were removed."
     )
     if ocr_used:
         st.caption(
@@ -1409,8 +1561,7 @@ with tab_values:
                         )
                         causes_html = (
                             f'<p style="margin-top:8px">'
-                            f'<strong>Possible causes mentioned/implied in '
-                            f'report:</strong></p>'
+                            f'<strong>Possible causes stated in report:</strong></p>'
                             f'<ul style="color:#cbd5e1;font-size:13.5px">'
                             f'{causes_items}</ul>'
                         )
@@ -1565,6 +1716,7 @@ with tab_ask:
                     max_tokens=2500,
                 )
                 answer = FollowUpAnswer.model_validate(raw)
+                answer = verify_followup_answer(answer, report_text)
                 st.session_state["followup"] = {
                     "question": question,
                     "answer": answer.model_dump(),
@@ -1594,9 +1746,14 @@ with tab_ask:
 
             if ans.source_quotes:
                 st.markdown("")
-                st.markdown("##### 📄 Evidence from your report")
+                st.markdown("##### 📄 Evidence from your report (verified)")
                 for sq in ans.source_quotes:
                     render_evidence(sq)
+            elif not ans.cannot_answer:
+                st.caption(
+                    "ℹ️ No verifiable quotes were returned for this answer. "
+                    "Treat it as unconfirmed."
+                )
 
     render_disclaimer()
 
@@ -1609,6 +1766,7 @@ st.markdown("""
     <span style="color:#64748b;font-size:13px">
         🩺 <strong style="color:#94a3b8">MedLens</strong> · Built with Streamlit + Groq (openai/gpt-oss-120b) ·
         Your data stays in this session · AI explains, never diagnoses ·
+        🛡️ Every output verified against source ·
         📷 OCR powered by Tesseract ·
         <strong>Always consult your physician</strong>
     </span>
