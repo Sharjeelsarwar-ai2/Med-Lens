@@ -10,8 +10,6 @@ import json
 import os
 import re
 import textwrap
-import types as _types
-import typing as _typing
 from typing import Literal
 
 import fitz  # PyMuPDF
@@ -26,7 +24,7 @@ from groq import (
     AuthenticationError,
     RateLimitError,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ─── Page config ──────────────────────────────────────────────
 
@@ -416,7 +414,50 @@ div[data-testid="stAlert"]{
 
 # ─── Pydantic schemas ────────────────────────────────────────
 
-class LabValue(BaseModel):
+class _LenientModel(BaseModel):
+    """Base model that truncates over-long string/list values to fit the
+    field's declared max_length before standard validation runs.
+
+    The LLM doesn't reliably respect max_length in the JSON schema, so a
+    single over-long field (e.g. report_type listing six panels) would
+    otherwise raise a ValidationError and kill the whole translation.
+    Truncating here turns that hard failure into a harmless trim, and it
+    runs automatically on every model_validate() call — no external
+    sanitizer to forget or misconfigure.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _truncate_fields(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        out: dict = {}
+        for name, field_info in cls.model_fields.items():
+            if name not in data:
+                continue
+            v = data[name]
+
+            max_len = None
+            for meta in (getattr(field_info, "metadata", None) or ()):
+                ml = getattr(meta, "max_length", None)
+                if ml is not None:
+                    max_len = ml if max_len is None else min(max_len, ml)
+
+            if max_len is not None and isinstance(v, (str, list)):
+                v = v[:max_len]
+
+            out[name] = v
+
+        # Preserve any extra keys the model invented — pydantic will ignore
+        # them, but keeping them makes the raw payload easier to debug.
+        for k, v in data.items():
+            if k not in out:
+                out[k] = v
+        return out
+
+
+class LabValue(_LenientModel):
     name: str = Field(max_length=120)
     reported_value: str = Field(max_length=80)
     reference_range: str = Field(max_length=100)
@@ -427,21 +468,21 @@ class LabValue(BaseModel):
     source_quote: str = Field(max_length=300)
 
 
-class GlossaryTerm(BaseModel):
+class GlossaryTerm(_LenientModel):
     term: str = Field(max_length=80)
     definition: str = Field(max_length=300)
     source_quote: str = Field(max_length=300)
 
 
-class DoctorQuestion(BaseModel):
+class DoctorQuestion(_LenientModel):
     question: str = Field(max_length=200)
     reason: str = Field(max_length=300)
 
 
-class ReportTranslation(BaseModel):
-    # NOTE: limits below are generous — the sanitizer trims to fit if the
-    # model gets verbose. Earlier caps (100/600/1200) tripped ValidationError
-    # whenever the model listed multiple panels or was unusually detailed.
+class ReportTranslation(_LenientModel):
+    # Limits are generous — the validator trims to fit if the model gets
+    # verbose. The earlier tight caps tripped ValidationError whenever the
+    # model listed multiple panels or was unusually detailed.
     report_type: str = Field(max_length=300)
     patient_summary: str = Field(max_length=800)
     overall_impression: str = Field(max_length=2000)
@@ -454,7 +495,7 @@ class ReportTranslation(BaseModel):
     confidence_note: str = Field(max_length=400)
 
 
-class FollowUpAnswer(BaseModel):
+class FollowUpAnswer(_LenientModel):
     answer: str = Field(max_length=1500)
     source_quotes: list[str] = Field(max_length=5)
     cannot_answer: bool = False
@@ -514,68 +555,6 @@ def strip_tags(text: str) -> str:
         return ""
     stripped = _TAG_RE.sub(" ", str(text))
     return re.sub(r"\s+", " ", stripped).strip()
-
-
-def sanitize_for_schema(data: dict, model_cls: type[BaseModel]) -> dict:
-    """Truncate strings/lists in raw LLM JSON to fit the pydantic schema.
-
-    The model doesn't reliably respect max_length in the JSON schema, so a
-    single over-long field (e.g. report_type listing six panels) would raise
-    a ValidationError and kill the whole translation. This walks the raw
-    dict against the model's field metadata and clips anything too long
-    before validation, turning a hard failure into a harmless trim.
-    """
-    if not isinstance(data, dict):
-        return data
-
-    out: dict = {}
-    for name, field in model_cls.model_fields.items():
-        if name not in data:
-            continue
-        value = data[name]
-        ann = field.annotation
-
-        # Unwrap Optional[X]
-        origin = _typing.get_origin(ann)
-        if origin in (_typing.Union, _types.UnionType):
-            non_none = [a for a in _typing.get_args(ann) if a is not type(None)]
-            if non_none:
-                ann = non_none[0]
-                origin = _typing.get_origin(ann)
-
-        # Field-level max_length — applies to str length OR list length
-        max_len = None
-        for meta in (field.metadata or ()):
-            ml = getattr(meta, "max_length", None)
-            if ml is not None:
-                max_len = ml if max_len is None else min(max_len, ml)
-
-        args = _typing.get_args(ann)
-
-        if isinstance(value, str):
-            out[name] = value[:max_len] if max_len else value
-
-        elif isinstance(value, list):
-            if max_len:
-                value = value[:max_len]
-            inner = args[0] if args else None
-            if isinstance(inner, type) and issubclass(inner, BaseModel):
-                value = [
-                    sanitize_for_schema(v, inner) if isinstance(v, dict) else v
-                    for v in value
-                ]
-            out[name] = value
-
-        elif isinstance(ann, type) and issubclass(ann, BaseModel) and isinstance(value, dict):
-            out[name] = sanitize_for_schema(value, ann)
-
-        else:
-            out[name] = value
-
-    # Preserve any extra keys the model invented (pydantic will ignore them)
-    for k, v in data.items():
-        out.setdefault(k, v)
-    return out
 
 
 def extract_pdf_text(file_bytes: bytes) -> str:
@@ -874,8 +853,9 @@ ABSOLUTE RULES — VIOLATING ANY RULE IS FORBIDDEN:
 12. Every text field must be PLAIN TEXT ONLY — no HTML tags (e.g. <p>,
     <br>, <div>), no Markdown formatting, no code blocks. Write normal
     sentences and paragraphs as plain strings.
-13. Keep report_type short: list only the panel names (e.g. "CBC + BMP
-    + Lipid Panel"), max 300 characters.
+13. In report_type, list only the panel names (e.g. "CBC + BMP + Lipid
+    Panel"). Do NOT omit or summarize any individual lab values — extract
+    every test result you can read from the report into lab_values.
 
 STATUS CLASSIFICATION (use ONLY report data):
 - "Normal": value is within the stated reference range.
@@ -1178,7 +1158,7 @@ with st.expander(
     current_fp = fp(report_text, model) if report_text else ""
 
     if st.session_state.get("report_fp") != current_fp:
-        for k in ["translation", "followup", "report_fp"]:
+        for k in ["translation", "followup", "report_fp", "last_raw_response"]:
             st.session_state.pop(k, None)
         if current_fp:
             st.session_state["report_fp"] = current_fp
@@ -1210,12 +1190,11 @@ with st.expander(
                     report_text + ocr_context,
                     max_tokens=6000,
                 )
-                translation = ReportTranslation.model_validate(
-                    sanitize_for_schema(raw, ReportTranslation)
-                )
+                translation = ReportTranslation.model_validate(raw)
                 st.session_state["translation"] = translation.model_dump()
                 st.session_state["report_text"] = report_text
                 st.session_state["ocr_used"] = ocr_used
+                st.session_state["last_raw_response"] = raw
                 st.session_state.pop("followup", None)
         except Exception as e:
             st.error(friendly_error(e))
@@ -1376,6 +1355,10 @@ with tab_values:
 
     if not tr.lab_values:
         st.info("No quantitative lab values were found in this report.")
+        raw = st.session_state.get("last_raw_response")
+        if raw:
+            with st.expander("🔬 Debug: raw AI response (for troubleshooting)"):
+                st.json(raw)
     else:
         filter_status = st.multiselect(
             "Filter by status",
@@ -1581,9 +1564,7 @@ with tab_ask:
                     payload,
                     max_tokens=2500,
                 )
-                answer = FollowUpAnswer.model_validate(
-                    sanitize_for_schema(raw, FollowUpAnswer)
-                )
+                answer = FollowUpAnswer.model_validate(raw)
                 st.session_state["followup"] = {
                     "question": question,
                     "answer": answer.model_dump(),
